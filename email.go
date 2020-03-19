@@ -6,12 +6,15 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"mime"
 	"net"
 	"net/mail"
 	"net/textproto"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -508,7 +511,22 @@ func (email *Email) AddAttachment(file string, name ...string) *Email {
 		return email
 	}
 
-	email.Error = email.attach(file, false, name...)
+	f, err := os.Open(file)
+	if err != nil {
+		email.Error = errors.New("Mail Error: Failed to add file with following error: " + err.Error())
+		return email
+	}
+	defer f.Close()
+
+	// get the filename
+	_, filename := filepath.Split(file)
+
+	// if an alternative filename was provided, use that instead
+	if len(name) == 1 {
+		filename = name[0]
+	}
+
+	email.Error = email.attachReader(f, filename, false)
 
 	return email
 }
@@ -525,7 +543,8 @@ func (email *Email) AddAttachmentBase64(b64File string, name string) *Email {
 		return email
 	}
 
-	email.Error = email.attachB64(b64File, name)
+	r := base64.NewDecoder(base64.StdEncoding, strings.NewReader(b64File))
+	email.Error = email.attachReader(r, name, false)
 
 	return email
 }
@@ -542,57 +561,56 @@ func (email *Email) AddInline(file string, name ...string) *Email {
 		return email
 	}
 
-	email.Error = email.attach(file, true, name...)
-
-	return email
-}
-
-// attach does the low level attaching of the files
-func (email *Email) attach(f string, inline bool, name ...string) error {
-	// Get the file data
-	data, err := ioutil.ReadFile(f)
+	f, err := os.Open(file)
 	if err != nil {
-		return errors.New("Mail Error: Failed to add file with following error: " + err.Error())
+		email.Error = errors.New("Mail Error: Failed to add file with following error: " + err.Error())
+		return email
 	}
-
-	// get the file mime type
-	mimeType := mime.TypeByExtension(filepath.Ext(f))
-	if mimeType == "" {
-		mimeType = "application/octet-stream"
-	}
+	defer f.Close()
 
 	// get the filename
-	_, filename := filepath.Split(f)
+	_, filename := filepath.Split(file)
 
 	// if an alternative filename was provided, use that instead
 	if len(name) == 1 {
 		filename = name[0]
 	}
 
-	if inline {
-		email.inlines = append(email.inlines, &file{
-			filename: filename,
-			mimeType: mimeType,
-			data:     data,
-		})
-	} else {
-		email.attachments = append(email.attachments, &file{
-			filename: filename,
-			mimeType: mimeType,
-			data:     data,
-		})
-	}
+	email.Error = email.attachReader(f, filename, true)
 
-	return nil
+	return email
 }
 
-// attachB64 does the low level attaching of the files but decoding base64 instead have a filepath
-func (email *Email) attachB64(b64File string, name string) error {
+// AddAttachmentReader allows you to add an attachment from a io.Reader to the email message.
+// You need provide a name for the file.
+func (email *Email) AddAttachmentReader(r io.Reader, name string) *Email {
+	if email.Error != nil {
+		return email
+	}
 
-	// decode the string
-	dec, err := base64.StdEncoding.DecodeString(b64File)
+	email.Error = email.attachReader(r, name, false)
+
+	return email
+}
+
+// AddInlineReader allows you to add an inline attachment from a io.Reader to the email message.
+// You need provide a name for the file.
+func (email *Email) AddInlineReader(r io.Reader, name string) *Email {
+	if email.Error != nil {
+		return email
+	}
+
+	email.Error = email.attachReader(r, name, true)
+
+	return email
+}
+
+// attachReader does the low level attaching of the files from a io.Reader
+func (email *Email) attachReader(r io.Reader, name string, inline bool) error {
+	// read the attachment
+	data, err := ioutil.ReadAll(r)
 	if err != nil {
-		return errors.New("Mail Error: Failed to decode base64 attachment with following error: " + err.Error())
+		return errors.New("Mail Error: Failed read attachment with following error: " + err.Error())
 	}
 
 	// get the file mime type
@@ -601,11 +619,19 @@ func (email *Email) attachB64(b64File string, name string) error {
 		mimeType = "application/octet-stream"
 	}
 
-	email.attachments = append(email.attachments, &file{
-		filename: name,
-		mimeType: mimeType,
-		data:     dec,
-	})
+	if inline {
+		email.inlines = append(email.inlines, &file{
+			filename: name,
+			mimeType: mimeType,
+			data:     data,
+		})
+	} else {
+		email.attachments = append(email.attachments, &file{
+			filename: name,
+			mimeType: mimeType,
+			data:     data,
+		})
+	}
 
 	return nil
 }
